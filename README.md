@@ -1,4 +1,3 @@
-📄 README.md 
 Watchtower Logger
 Python
 discord.py
