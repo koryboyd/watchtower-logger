@@ -1,27 +1,21 @@
 """
-Watchtower Logger Cog (media-order + per-file Catbox uploads + embed-first layout)
+Watchtower Logger Cog (attachments-only; transcripts removed)
 
-This cog ensures:
-- Ticket text (rule + public notes + recent context) is included in the main embed so mods can read everything
-  without opening external links.
-- All media (attachments + transcript) are uploaded individually to catbox.moe (one upload per file).
-  No batch upload to catbox.
-- Media links are posted directly under the embed in the same relative order and with author/timestamp
-  context, so moderators can read the ticket text and see which media belongs to which message without
-  opening the links.
-- Small attachments that fail to upload are attached to the Watchtower thread as Discord files
-  (fallback).
-- Per-rule repeat-offender detection and infraction recording remains intact.
+Changes in this version:
+- Transcripts are NOT uploaded anywhere. Removed transcript upload functionality.
+- All ticket messages (recent context and the moderator's provided public "notes") are placed directly into the embed so mods can read text without opening links.
+  - Embed text is truncated safely to Discord-friendly limits (fields trimmed to avoid embed-size errors).
+- Attachments are still uploaded individually to Catbox (one upload per file). No batch uploads.
+- Media links are posted directly under the embed in the same chronological order they appeared in the ticket.
+- Small files that fail to upload are attached as Discord files (fallback).
+- Per-rule repeat detection and infraction recording unchanged.
+- Keeps robust thread creation, Points API integration, and defensive error handling.
 
-Environment variables:
-- WATCHTOWER_CHANNEL_ID (required) — watchtower channel id
-- POINTS_API_URL, POINTS_API_TOKEN — points API config
-- CATBOX_USERHASH — optional catbox userhash to attribute uploads
-- ATTACHMENT_BATCH_SIZE — how many files to attach to a single Discord message (fallback)
-
-Database expectations:
-- users(steamid TEXT, discordid INTEGER, ign TEXT, total_points INTEGER optional)
-- infractions(id, steamid, discordid, reason, timestamp) — used to detect repeats by rule
+Note on embed size:
+Discord imposes limits on total embed size and per-field sizes. This cog attempts to preserve as much text as reasonably fits:
+- Recent context field is limited to 1024 characters (Discord field value limit).
+- Description (which contains rule + ticket text) is limited to 4096 characters overall -- we truncate if necessary and annotate truncation.
+If you routinely have extremely long ticket message dumps, consider storing full transcripts in internal storage and linking them (not done here per your request).
 """
 
 from __future__ import annotations
@@ -40,15 +34,19 @@ from discord.ext import commands
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Config (env-overrides)
+# Configuration (env overrides)
 WATCHTOWER_CHANNEL_ID: int = int(os.getenv("WATCHTOWER_CHANNEL_ID", "0"))
 POINTS_API_URL: str = os.getenv("POINTS_API_URL", "http://127.0.0.1:5000/api/warn")
 POINTS_API_TOKEN: str = os.getenv("POINTS_API_TOKEN", "CHANGE_ME")
 CATBOX_USERHASH: str = os.getenv("CATBOX_USERHASH", "")
 ATTACHMENT_BATCH_SIZE: int = int(os.getenv("ATTACHMENT_BATCH_SIZE", "10"))
 
+# Embed size limits to respect
+EMBED_DESCRIPTION_LIMIT = 4096
+EMBED_FIELD_VALUE_LIMIT = 1024
 
-# ---- parsing + resolution helpers (unchanged semantics) ----
+
+# ---------------- Parsing & resolution helpers ----------------
 
 
 def parse_offender_line(line: str) -> Optional[Dict[str, str]]:
@@ -113,7 +111,7 @@ async def resolve_offender(bot: commands.Bot, identifier: str, db_cursor, rule: 
                             if discord_candidate:
                                 discord_name = await _safe_fetch_user_name(bot, discord_candidate)
                     except Exception:
-                        logger.debug("DB users lookup by steamid failed", exc_info=True)
+                        logger.debug("DB lookup users by steamid failed", exc_info=True)
                 else:
                     try:
                         discord_id = int(cleaned)
@@ -220,9 +218,6 @@ class CatboxUploader:
         self.userhash = userhash
 
     async def upload_bytes(self, filename: str, data: bytes, content_type: Optional[str] = None) -> Optional[str]:
-        """
-        Upload a single file to Catbox. Returns URL on success else None.
-        """
         try:
             form = aiohttp.FormData()
             form.add_field("reqtype", "fileupload")
@@ -256,49 +251,20 @@ class WatchtowerLogger(commands.Cog):
         except Exception:
             logger.exception("Error closing aiohttp session", exc_info=True)
 
-    async def generate_transcript_url(self, channel: discord.abc.Messageable) -> Optional[str]:
-        """
-        Create HTML transcript (in-memory) and upload to catbox; returns url or None.
-        """
-        try:
-            parts: List[str] = [
-                "<!doctype html>",
-                "<html><head><meta charset='utf-8'><title>Transcript</title>",
-                "<style>body{font-family:sans-serif;background:#2f3136;color:#dcddde} .message{margin:8px;padding:4px;border-bottom:1px solid rgba(255,255,255,0.03);} .author{font-weight:600;} .timestamp{color:#72767d;font-size:0.8em;margin-right:6px;}</style>",
-                "</head><body>"
-            ]
-            async for msg in channel.history(limit=None, oldest_first=True):
-                ts = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
-                author = getattr(msg.author, "display_name", None) or getattr(msg.author, "name", "Unknown")
-                content = discord.utils.escape_markdown(msg.clean_content or "")
-                content = content.replace("\n", "<br>")
-                parts.append(f"<div class='message'><span class='timestamp'>{ts}</span> <span class='author'>{author}:</span> <span class='content'>{content}</span></div>")
-            parts.append("</body></html>")
-            html_bytes = "\n".join(parts).encode("utf-8")
-            filename = f"transcript_{int(time.time())}.html"
-            return await self.catbox.upload_bytes(filename, html_bytes, content_type="text/html")
-        except Exception:
-            logger.exception("Failed to generate/upload transcript", exc_info=True)
-            return None
-
     async def collect_and_upload_attachments(self, channel: discord.abc.Messageable) -> List[Dict[str, Any]]:
         """
         Walk channel history in chronological order and upload each attachment separately.
         Return a list of dicts in chronological order, each dict contains:
          - filename, url (catbox or None), fallback_file (discord.File or None),
-         - author_name (str), timestamp (str), message_content (str)
-        This allows media to be enumerated exactly as they appear in the ticket.
+         - author_name (str), timestamp (str), message_text (str)
         """
         results: List[Dict[str, Any]] = []
         try:
-            # iterate oldest -> newest so ordering matches how moderators read the ticket
             async for msg in channel.history(limit=None, oldest_first=True):
-                # capture message text so we can show it alongside any media posted in that message
                 author_name = getattr(msg.author, "display_name", None) or getattr(msg.author, "name", "Unknown")
                 ts = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
                 message_text = (msg.clean_content or "").strip()
 
-                # For each attachment in this message, upload separately and append an entry describing it
                 for att in msg.attachments:
                     entry: Dict[str, Any] = {
                         "filename": getattr(att, "filename", "attachment"),
@@ -314,7 +280,6 @@ class WatchtowerLogger(commands.Cog):
                             results.append(entry)
                             continue
 
-                        # Download bytes
                         async with self.session.get(att.url) as resp:
                             if resp.status != 200:
                                 logger.error("Failed to download attachment %s: HTTP %s", att.url, resp.status)
@@ -442,16 +407,13 @@ class WatchtowerLogger(commands.Cog):
         except Exception:
             logger.exception("Failed to record infraction (table may not exist)", exc_info=True)
 
-    async def _post_media_links(self, thread: discord.abc.Messageable, transcript_url: Optional[str], attachments: List[Dict[str, Any]]) -> None:
+    async def _post_media_links(self, thread: discord.abc.Messageable, attachments: List[Dict[str, Any]]) -> None:
         """
         Post media in readable format mirroring the ticket order:
         For each attachment: show author, timestamp, optional message text, then filename: url (or upload failed)
-        Each block is one line per media entry; chunked into messages to remain manageable.
+        Chunked to avoid large messages.
         """
         lines: List[str] = []
-        if transcript_url:
-            lines.append(f"Transcript: {transcript_url}")
-
         for att in attachments:
             author = att.get("author_name", "Unknown")
             ts = att.get("timestamp", "")
@@ -466,8 +428,8 @@ class WatchtowerLogger(commands.Cog):
         if not lines:
             return
 
-        # Chunk to avoid large single messages and keep readability
-        chunk_size = 5  # 5 media entries per message (each entry may be multi-line)
+        # chunk (smaller chunk size because each entry is multi-line)
+        chunk_size = 5
         for i in range(0, len(lines), chunk_size):
             chunk = lines[i : i + chunk_size]
             try:
@@ -490,7 +452,7 @@ class WatchtowerLogger(commands.Cog):
             "`@DiscordUser [points] [rule] | [mod_notes] | [notes]`\n"
             "`SteamID64     [points] [rule] | [mod_notes] | [notes]`\n"
             "- Points optional (default 0)\n"
-            "- Rule optional\n"
+            "- Rule optional (recommended for repeat detection)\n"
             "- Mod notes = internal staff only\n"
             "- Notes = public in embed\n"
             "- **SteamID64 works even if not linked to Discord**",
@@ -511,19 +473,30 @@ class WatchtowerLogger(commands.Cog):
             await interaction.followup.send("Timed out waiting for offenders paste.", ephemeral=True)
             return
 
-        # Recent context: latest 20 messages (for embed)
+        # Recent context: latest 20 messages (we will include these in embed, truncated to fit)
         try:
             recent_msgs = [m async for m in ticket_channel.history(limit=20, oldest_first=False)]
-            context = "\n".join(f"{getattr(m.author, 'display_name', None) or m.author.name}: {m.clean_content[:300]}" for m in recent_msgs)
+            # Build a readable context string (newest last)
+            context_lines: List[str] = []
+            for m in reversed(recent_msgs):  # show chronological order (oldest -> newest)
+                author = getattr(m.author, "display_name", None) or getattr(m.author, "name", "Unknown")
+                snippet = (m.clean_content or "").strip()
+                # Keep each line reasonably short
+                if len(snippet) > 700:
+                    snippet = snippet[:697] + "..."
+                context_lines.append(f"{author}: {snippet}")
+            context_full = "\n".join(context_lines)
+            # Truncate to field-friendly size
+            context_field = context_full[:EMBED_FIELD_VALUE_LIMIT]
+            if len(context_full) > EMBED_FIELD_VALUE_LIMIT:
+                context_field = context_field.rsplit("\n", 1)[0] + "\n...(truncated)"
         except Exception:
             logger.exception("Failed to fetch recent context", exc_info=True)
-            context = "Context unavailable."
+            context_field = "Context unavailable."
 
-        # Prepare evidence uploads (transcript + per-file attachments). We upload every file separately.
-        transcript_url = await self.generate_transcript_url(ticket_channel)
+        # Prepare evidence uploads (attachments only; no transcript)
         attachments = await self.collect_and_upload_attachments(ticket_channel)
 
-        # Resolve watchtower channel
         watchtower = self.bot.get_channel(WATCHTOWER_CHANNEL_ID)
         if not watchtower or not isinstance(watchtower, (discord.TextChannel, discord.ForumChannel)):
             await interaction.followup.send("Watchtower channel invalid or inaccessible. Please check configuration.", ephemeral=True)
@@ -544,14 +517,15 @@ class WatchtowerLogger(commands.Cog):
 
             thread_name = f"{offender['discord_name']} | {offender['steamid']}" if offender["discord_name"] != "Unknown" else offender["steamid"]
 
-            # Build embed: include rule + ticket text (public notes) plus recent context
+            # Build embed description: include rule + public ticket text (notes). Ensure we don't exceed limits.
             description_parts: List[str] = []
             if parsed["rule"]:
                 description_parts.append(f"Rule: {parsed['rule']}")
             if parsed["notes"]:
-                # Keep the ticket's public text directly in the embed so mods can read it immediately
                 description_parts.append(f"Ticket Text: {parsed['notes']}")
-            description = "\n".join(description_parts) or "—"
+            description = "\n".join(description_parts).strip() or "—"
+            if len(description) > EMBED_DESCRIPTION_LIMIT:
+                description = description[:EMBED_DESCRIPTION_LIMIT - 12] + "\n...(truncated)"
 
             embed = discord.Embed(
                 title=f"Ticket Resolution {f'#{ticket_id}' if ticket_id else ''}",
@@ -563,12 +537,11 @@ class WatchtowerLogger(commands.Cog):
             embed.add_field(name="SteamID", value=offender["steamid"], inline=True)
             embed.add_field(name="IGN", value=offender["ign"], inline=True)
             embed.add_field(name="Points Applied", value=str(parsed["points"]), inline=True)
-            if context:
-                embed.add_field(name="Recent Context (latest messages)", value=(context[:1024] if context else "—"), inline=False)
+            embed.add_field(name="Recent Context (latest messages)", value=(context_field or "—"), inline=False)
             if offender.get("repeat_offender"):
                 embed.add_field(name="Repeat Offender (same rule)", value="Yes — previous infraction for this rule detected", inline=False)
 
-            # Find or create a watchtower thread
+            # Find or create thread
             thread = await self._find_thread(watchtower, thread_name)
             if not thread:
                 thread = await self._create_watchtower_thread(watchtower, thread_name, "Watchtower thread initialized.")
@@ -581,6 +554,7 @@ class WatchtowerLogger(commands.Cog):
                 await thread.send(embed=embed)
             except Exception:
                 logger.exception("Failed to send embed", exc_info=True)
+
             if parsed["mod_notes"]:
                 try:
                     await thread.send(f"**Staff Notes:** {parsed['mod_notes']}")
@@ -608,18 +582,18 @@ class WatchtowerLogger(commands.Cog):
                     except Exception:
                         logger.exception("Failed to send Points API response", exc_info=True)
 
-            # Record infraction (reason = rule or notes or points)
+            # Record infraction
             try:
                 reason_to_record = parsed["rule"] or parsed["notes"] or f"Points:{parsed['points']}"
                 self._record_infraction(db_cursor, db_conn, offender.get("steamid"), offender.get("discord_id"), reason_to_record)
             except Exception:
                 logger.exception("Failed recording infraction (continuing)", exc_info=True)
 
-            # Post media links (transcript + attachments) directly under the embed in chronological order, preserving
-            # author/timestamp/message-text context so mods can read ticket text then glance the media list.
+            # Post media links (attachments only) in chronological order beneath embed, preserving author/timestamp/message text context.
+            # Only post once (for the first offender per ticket) to avoid duplication.
             if processed == 0:
                 try:
-                    await self._post_media_links(thread, transcript_url, attachments)
+                    await self._post_media_links(thread, attachments)
                 except Exception:
                     logger.exception("Failed to post media links", exc_info=True)
 
