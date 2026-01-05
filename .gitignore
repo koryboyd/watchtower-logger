@@ -1,12 +1,33 @@
+# Python
 __pycache__/
-.env
-*.db
-*.sqlite
-config.py
-transcripts/
-*.html
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
+env/
+venv/
+.venv/
+.Python
+
+# Virtualenv
+venv/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# IDEs
+.vscode/
+.idea/
+
+# Env
+.env
+.env.local
+
+# Transcripts / data
+transcripts/
+*.sqlite
+*.db
+
 .DS_Store
-Thumbs.db
