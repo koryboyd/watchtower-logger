@@ -1,81 +1,46 @@
-# Integration — Installing Watchtower Logger into an existing ticketing bot
+# Integration — Integrating Watchtower Logger into an existing ticketing bot
 
-This guide explains how to add the Watchtower Logger cog into an existing ticketing bot and how to enable Catbox hosting for transcripts & attachments.
+This document explains how to call the cog from an existing ticketing workflow (Ticket Tool, Tickets Bot, or custom).
 
-Prerequisites
-- Python 3.10+
-- discord.py v2.x
-- Bot token with permissions:
-  - Read Message History
-  - Send Messages
-  - Create Threads / Create Forum Posts
-  - Manage Messages (optional)
-  - Attach Files (fallback)
+Public API (what your ticketing bot needs to call)
+- Method: `WatchtowerLogger.log_from_resolve(interaction, ticket_channel, db_cursor, db_conn, ticket_id="")`
+  - `interaction` — a `discord.Interaction` representing the moderator action (used to prompt the moderator ephemeral)
+  - `ticket_channel` — the ticket channel or thread (`discord.TextChannel` or `discord.Thread`)
+  - `db_cursor` — DB cursor used to query `users` and `infractions` tables (must implement `execute()` and `fetchone()`)
+  - `db_conn` — DB connection used for `commit()` after inserting infractions (optional, may be `None`)
+  - `ticket_id` — optional ticket number/reference inserted into embed & points notes
 
-1) Install dependencies
-```bash
-python -m pip install -r requirements.txt
-```
-
-2) Environment variables (recommended)
-- WATCHTOWER_CHANNEL_ID — (required) ID of the channel used as Watchtower (text or forum). Example: `123456789012345678`
-- POINTS_API_URL — (optional) Points API endpoint (default: `http://127.0.0.1:5000/api/warn`)
-- POINTS_API_TOKEN — (recommended) Bearer token for Points API; if missing, points application is skipped.
-- CATBOX_USERHASH — (optional) Your catbox.moe userhash; if set, uploads are attributed to your account.
-Set variables, e.g.:
-```bash
-export WATCHTOWER_CHANNEL_ID="123456789012345678"
-export POINTS_API_TOKEN="supersecret"
-export CATBOX_USERHASH="..."
-```
-
-3) Copy files
-- cogs/watchtower_logger.py
-- cogs/parser.py
-
-Place under your bot's `cogs/` directory (or import path).
-
-4) Load cog
-If your bot uses `load_extension`:
-```python
-await bot.load_extension("cogs.watchtower_logger")
-```
-or:
-```python
-from cogs.watchtower_logger import WatchtowerLogger
-await bot.add_cog(WatchtowerLogger(bot))
-```
-
-5) Calling from your ticket flow
-From the code that marks tickets resolved, call:
+Example integration snippet
 ```python
 watchtower = bot.get_cog("WatchtowerLogger")
-await watchtower.log_from_resolve(interaction, ticket_channel, db_cursor, db_conn, ticket_id="123")
-```
-- `interaction`: discord.Interaction (or an object with `.user`/`.channel` for prompting).
-- `ticket_channel`: TextChannel or Thread containing the ticket.
-- `db_cursor`: sqlite3.Cursor or equivalent DB cursor used to resolve steamid/discordid/ign.
-- `db_conn`: optional DB connection.
-
-6) DB expectations
-The cog attempts a few strategies:
-- Preferred: an `infractions` table with rows for previous infractions:
-  `infractions( id INTEGER PRIMARY KEY, steamid TEXT, discordid INTEGER, reason TEXT, timestamp INTEGER )`
-- Fallback: a `users` table with `steamid`, `discordid`, `ign`, and optionally `total_points`.
-If your schema differs, adapt `cogs/parser.py` resolve logic or create the `infractions` table.
-
-7) Catbox considerations
-- Catbox limits vary; the cog will skip extremely large files.
-- If uploads fail, the cog falls back to sending smaller files directly to Discord.
-
-8) Testing
-Run unit tests:
-```bash
-pytest -q
+if not watchtower:
+    await interaction.response.send_message("Watchtower not loaded.", ephemeral=True)
+else:
+    # db_cursor and db_conn are your application's database objects
+    await watchtower.log_from_resolve(interaction, ticket_channel, db_cursor, db_conn, ticket_id="1234")
 ```
 
-9) Next steps / Customization
-- Adjust thresholds (repeat-offender detection) in cogs/parser.py
-- Add DB migration to create `infractions` table and record infractions when applying points
-- Add admin commands to configure watchtower channel at runtime
-```
+Moderator workflow (what `log_from_resolve` does)
+1. Ephemeral prompt asks moderator for a bulk paste of offenders (one per line).
+2. Moderator pastes lines of the format:
+   - `@DiscordUser [points] [rule] | [mod_notes] | [notes]`
+   - `SteamID64     [points] [rule] | [mod_notes] | [notes]`
+3. Cog parses lines, resolves offender identity (SteamID/Discord/IGN), creates or finds a watchtower thread, posts an embed (includes rule & public ticket text), posts media links (uploaded individually to Catbox) below the embed, applies points via Points API, and records infractions into the `infractions` table.
+
+Notes about integration
+- `log_from_resolve` expects to run as part of an async context (your ticketing bot should await the call).
+- The cog will prompt the moderator (via ephemeral followup) and wait for a message from the same moderator in the same channel — ensure your ticket flow allows that interaction.
+- If your bot uses a different data layer (ORM or custom DB helper), pass a DB cursor compatible with `.execute()`/`.fetchone()` or write a small adapter wrapper.
+
+Customizing behavior
+- You can alter behavior by environment variables (see docs/configuration.md).
+- If your ticket flow already prepares transcript and uploads, you may bypass the cog's evidence uploading and instead pass a transcript URL into the embed — modify the cog accordingly or open an issue asking for a hook.
+
+Permissions checklist
+- Ensure the bot has channel-level permission to create threads or forum posts and to send messages in the watchtower channel.
+- Ensure bot has permission to read message history and view attachments in the ticket channel.
+
+Troubleshooting integration
+- If the ephemeral prompt doesn't appear: verify your `interaction` object is valid and that your command handler awaited `interaction.response.defer()` or otherwise didn't complete the interaction elsewhere.
+- If the bot cannot fetch messages: check message history permissions and MESSAGE_CONTENT intent.
+- If thread creation fails in a Forum channel: check discord.py version and forum API; the cog has fallbacks but some older/newer API combinations may require tiny adjustments.

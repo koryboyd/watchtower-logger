@@ -1,83 +1,50 @@
-# Usage Guide
+# Points API integration
 
-This guide explains exactly how moderators use **Watchtower Logger** during ticket resolution.
+Watchtower Logger optionally integrates with a Points API to apply point penalties automatically.
 
-The process is simple, bulk-friendly, and flexible — designed for speed in high-volume moderation.
+Request payload
+- `POST` to `POINTS_API_URL` with header `Authorization: Bearer <POINTS_API_TOKEN>` and JSON body:
+```json
+{
+  "steamid": "76561198000000000",
+  "points": 2,
+  "reason": "Over packing rexes",
+  "notes": "Public notes | Ticket 123",
+  "issuer": "Moderator#0000"
+}
+```
 
-### Moderator Workflow
+Expected responses
+- 200 OK with JSON — the cog will parse JSON and display fields such as `total_points` and `action` (if present).
+  Example:
+  ```json
+  {
+    "total_points": 5,
+    "action": "warning"
+  }
+  ```
+- Non-200 — cog logs the response text and posts a "Points application failed" flag in the thread.
 
-1. **Resolve the Ticket**  
-   Your ticket bot calls `log_from_resolve` (as shown in Integration Guide).
+Retry & resilience
+- The cog retries transient errors (HTTP 429 / 502 / 503 / 504) with exponential backoff (3 attempts).
+- If `POINTS_API_TOKEN` is missing or equals `CHANGE_ME`, the cog skips Points API calls and logs a warning.
 
-2. **Bot Prompts You** (ephemeral message, only you see it):
-Bulk paste offenders (one per line):
-@DiscordUser [points] [rule] | [mod_notes] | [notes]
-SteamID64     [points] [rule] | [mod_notes] | [notes]
+Security
+- Use a strong secret for `POINTS_API_TOKEN`.
+- Restrict the Points API endpoint to accept only connections from trusted IPs (or protect with other network controls) if possible.
 
-Points optional (default 0)
-Rule optional
-Mod notes = internal staff only
-Notes = public in embed
-SteamID64 works even if not linked to Discord
+Server-side considerations (Points API implementer)
+- Return meaningful JSON for `total_points` and `action` when appropriate.
+- Validate input and authenticate using bearer token.
+- Rate-limit clients to avoid accidental spam from automated recon attempts.
 
-text3. **Paste Your Offenders** (one line per offender)  
-Send a message with the list. The bot deletes it immediately for privacy.
-
-4. **Bot Confirms** (ephemeral):
-Outputs:
-- A Watchtower thread per offender (created or reused).
-- An embed summarizing the resolution, points, and notes.
-- Evidence hosted on Catbox (links) and small attachments optionally sent to Discord as fallback.
-- Points API call (if configured). If Points API responds with metadata (total_points/action) that will be posted.
-
-Repeat offence flag:
-- The embed includes a label if the offender has previous entries in `infractions` or `users.total_points` > 0 (fallback).
-
-### Input Format (Flexible)
-identifier [points] [rule] | [mod_notes] | [public_notes]
-text- **`identifier`**: Either `@DiscordMention` or raw `SteamID64` (17-19 digits)
-- **`[points]`**: Integer (optional, default 0)
-- **`[rule]`**: Short rule name (e.g., RDM, Toxicity) — optional
-- **`|` separates sections**
-- **`[mod_notes]`**: Staff-only internal notes (never shown in main embed)
-- **`[public_notes]`**: Visible in embed "Public Notes" field
-
-#### Examples
-
-**Standard linked player:**
-@PlayerOne 3 RDM | Repeat offender, watch closely | Spawn camping near main base
-text**SteamID-only (unlinked player):**
-76561198000000000 1 Chat Abuse | First offense, verbal warning given | Excessive swearing
-text**No points (info/warning only):**
-@PlayerTwo 0 | Discussed rules in voice | Verbal reminder about mic spam
-text**Minimal entry:**
-76561198123456789
-text→ Logs with 0 points, all other fields "—"
-
-**Multiple offenders (bulk):**
-@JohnDoe 5 Griefing | Known griefer, consider ban | Destroyed team base
-76561198234567890 2 RDM | New player, lenient | Killed teammate at spawn
-@JaneSmith 0 | No violation found | False report, explained rules
-text### What Happens in Watchtower
-
-For each offender:
-- Thread named: `DiscordName | SteamID` or just `SteamID` if unlinked
-- Main embed (public to staff):
-  - Discord / SteamID / IGN
-  - Points Applied / Rule Broken / Public Notes
-  - Recent ticket context (last 20 messages)
-- Separate message: `**Staff Notes:**` (if provided)
-- Points feedback (e.g., "New total: 15 points", "Escalation: Temp ban applied")
-- **First offender only**: Full evidence package
-  - HTML transcript (downloadable)
-  - All ticket attachments (batched messages if >10)
-
-### Tips for Moderators
-
-- Use SteamID64 for players without Discord link — works perfectly.
-- Keep mod_notes for internal discussion (e.g., "Escalate if repeats").
-- Public notes for factual summary visible in embed.
-- No need to worry about file limits — everything uploads automatically.
-- If something fails (rare), it's noted in the thread (e.g., API down).
-
-This system ensures complete audit trails with zero manual effort beyond the paste.
+Troubleshooting
+- If points are not applied:
+  - Confirm `POINTS_API_URL` and `POINTS_API_TOKEN`.
+  - Test the API via curl:
+    ```bash
+    curl -X POST -H "Authorization: Bearer $POINTS_API_TOKEN" -H "Content-Type: application/json" \
+         -d '{"steamid":"76561198000000000","points":1,"reason":"Test","notes":"test","issuer":"me"}' \
+         https://points.example/api/warn
+    ```
+  - Inspect Watchtower bot logs for the raw response body when the response is non-200.
