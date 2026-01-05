@@ -24,14 +24,14 @@ text3. **Paste Your Offenders** (one line per offender)
 Send a message with the list. The bot deletes it immediately for privacy.
 
 4. **Bot Confirms** (ephemeral):
-Logged X offender(s) to Watchtower with full evidence.
-SteamID-only entries are fully supported.
-text5. **Done** — Watchtower receives:
-- Per-offender thread (or appends to existing)
-- Clean embed with all details
-- Staff-only moderator notes
-- Points API feedback (totals, escalations)
-- Full HTML transcript + **all** attachments (batched if many)
+Outputs:
+- A Watchtower thread per offender (created or reused).
+- An embed summarizing the resolution, points, and notes.
+- Evidence hosted on Catbox (links) and small attachments optionally sent to Discord as fallback.
+- Points API call (if configured). If Points API responds with metadata (total_points/action) that will be posted.
+
+Repeat offence flag:
+- The embed includes a label if the offender has previous entries in `infractions` or `users.total_points` > 0 (fallback).
 
 ### Input Format (Flexible)
 identifier [points] [rule] | [mod_notes] | [public_notes]

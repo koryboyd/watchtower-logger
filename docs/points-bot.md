@@ -1,41 +1,21 @@
-# 📄 docs/points-bot.md
-
-```markdown
 # Points Bot Integration
 
-The cog applies points via a **secure HTTP API** — this is the only ToS-compliant way to integrate with another bot.
-
-### Required Endpoint
-POST /api/warn
-text### Request Headers
-```headers
-Authorization: Bearer <POINTS_API_TOKEN>
-Content-Type: application/json
-Request Body (JSON)
-JSON{
-  "steamid": "76561198000000000",
-  "points": 3,
-  "reason": "RDM",
-  "notes": "Spawn camping | Ticket 1234",
-  "issuer": "ModeratorName#1234"
+The cog will call the configured `POINTS_API_URL` with a JSON payload:
+```json
+{
+  "steamid": "7656119...",
+  "points": 2,
+  "reason": "Griefing",
+  "notes": "Public notes | Ticket 123",
+  "issuer": "Moderator#0000"
 }
-Expected Responses
+```
 
-200 OK: Success. Optional JSON body for feedback:JSON{
-  "total_points": 15,
-  "action": "Temporary ban applied",
-  "previous_points": 12
-}These fields will be displayed in the Watchtower thread.
-Non-200: Treated as failure. Error is logged in the Watchtower thread.
+Expected behavior:
+- If the API returns 200 and JSON, the cog will display any returned fields such as `total_points` and `action`.
+- If the API is not configured, the cog will skip application and log a warning.
 
-Implementation Tips for Your Points Bot
-
-Validate the bearer token.
-Accept both integer and string points.
-Append ticket reference to notes if desired.
-Return useful escalation info — moderators love seeing "New total: 15 → Ban threshold reached".
-Rate-limit if exposed publicly.
-
-Why HTTP API?
-Discord explicitly disallows bots invoking other bots' slash commands.
-This method is clean, reliable, auditable, and fully compliant.
+Tips:
+- Make your Points API return `{"total_points": N, "action": "ban"}` etc. The cog will show these fields when present.
+- Consider adding a webhook endpoint to notify the cog when points are changed outside the flow (optional).
+```

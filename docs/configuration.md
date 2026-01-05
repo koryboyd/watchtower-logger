@@ -1,29 +1,35 @@
-# 📄 docs/configuration.md
-
 ```markdown
-# Configuration Guide
+# Configuration
 
-All configuration is at the top of `cogs/watchtower_logger.py`.
+All runtime configuration is sourced from environment variables (recommended) with sensible defaults:
 
-| Variable                  | Type   | Description                                                                 | Recommended Value / Notes                                      |
-|---------------------------|--------|-----------------------------------------------------------------------------|----------------------------------------------------------------|
-| `WATCHTOWER_CHANNEL_ID`   | int    | ID of the staff-only Watchtower channel (text or forum)                     | Right-click channel → Copy ID                                  |
-| `POINTS_API_URL`          | str    | Full URL of your Points Bot warning endpoint                                | e.g., `"https://points.example.com/api/warn"` (use HTTPS in prod) |
-| `POINTS_API_TOKEN`        | str    | Bearer token for authenticating with Points Bot                              | **Never hardcode in prod** — use `os.getenv("POINTS_TOKEN")`   |
-| `TRANSCRIPT_DIRECTORY`    | str    | Folder where HTML transcripts are temporarily saved before upload           | Default `"transcripts"` — ensure bot has write permission      |
-| `ATTACHMENT_BATCH_SIZE`   | int    | Number of files per message (Discord limit is 10)                           | Keep at 10 unless Discord changes limits                       |
+- WATCHTOWER_CHANNEL_ID (required): ID of the Watchtower channel (text or forum).
+- POINTS_API_URL: Points API endpoint (default: http://127.0.0.1:5000/api/warn).
+- POINTS_API_TOKEN: Bearer token to authenticate to the Points API. If unset or set to CHANGE_ME, points application is skipped.
+- CATBOX_USERHASH: Optional catbox.moe userhash to attribute uploads.
+- ATTACHMENT_BATCH_SIZE: How many files to send per Discord message (default 10).
 
-### Production Security Recommendations
-```python
-import os
+Database:
+- The cog expects a DB cursor with the following queries available:
+  - `SELECT steamid, ign FROM users WHERE discordid=?`
+  - `SELECT discordid, ign FROM users WHERE steamid=?`
+  - Optionally an `infractions` table is used to flag repeat offenders:
+    - `SELECT COUNT(*) FROM infractions WHERE steamid=?`
 
-POINTS_API_TOKEN = os.getenv("POINTS_API_TOKEN")
-if not POINTS_API_TOKEN:
-    raise ValueError("POINTS_API_TOKEN environment variable required")
-Add to .env:
-textPOINTS_API_TOKEN=your_super_secret_token
-Use a secrets manager (Docker secrets, Railway variables, etc.) in hosted environments.
-Permissions
+If you cannot create an `infractions` table, the cog will attempt to check `users.total_points` (if present) as a fallback method to detect repeat offenders.
 
-Watchtower channel: Staff-only (deny @everyone and member roles View Channel/Send Messages).
-Bot needs: View Channel, Send Messages, Manage Threads, Attach Files, Embed Links, Read Message History in Watchtower and ticket channels.
+Migration example (SQLite):
+```sql
+CREATE TABLE IF NOT EXISTS infractions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  steamid TEXT NOT NULL,
+  discordid INTEGER,
+  reason TEXT,
+  timestamp INTEGER DEFAULT (strftime('%s','now'))
+);
+```
+
+Security
+- Never hard-code POINTS_API_TOKEN in source.
+- Use environment secrets (e.g., process env or Docker secrets).
+```
